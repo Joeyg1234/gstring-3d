@@ -111,6 +111,7 @@ let center=[0,0,0], radius=1;
 let baseM=[1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
 
 function rotZ(t){ const c=Math.cos(t), s=Math.sin(t); return [c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1]; }
+function rotXm(t){ const c=Math.cos(t), s=Math.sin(t); return [1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]; }
 
 function setupModel(model){
   // reset scene state so models can be swapped at runtime
@@ -158,6 +159,10 @@ function computeNormals(pos, idx){
   const q = new URLSearchParams(location.search);
   const rotDeg = q.has("rot") ? parseFloat(q.get("rot")) : (model.rot || 0);
   if(rotDeg) baseM = matMul(rotZ(rotDeg*Math.PI/180), baseM);
+
+  // pitch (degrees): tips the model toward/away from the viewer — e.g. -90 brings the bottom face to the front
+  const pitchDeg = q.has("pitch") ? parseFloat(q.get("pitch")) : (model.pitch || 0);
+  if(pitchDeg) baseM = matMul(rotXm(pitchDeg*Math.PI/180), baseM);
 
   // per-model starting yaw (degrees) so the FRONT of the part faces the viewer: "yaw" in JSON or ?yaw=
   const yawDeg = q.has("yaw") ? parseFloat(q.get("yaw")) : (model.yaw || 0);
