@@ -44,4 +44,17 @@ $w.onReady(async function () {
         console.log("3D viewer:", err);
         $w(HTML_ID).collapse();
     }
+
+    // COLOR SYNC: when the customer picks the product's Color option,
+    // repaint the 3D model to match.
+    $w('#productPage1').onChoiceSelected((selectedChoices) => {
+        try {
+            const choices = selectedChoices || {};
+            const colorKey = Object.keys(choices).find(k => k.toLowerCase().includes('color'));
+            if (colorKey && choices[colorKey]) {
+                $w(HTML_ID).postMessage({ type: "setColor", name: choices[colorKey] });
+                // add  , finish: "powder"  to prefer powder-coat swatches instead of anodize
+            }
+        } catch (e) { console.log("3D color sync:", e); }
+    });
 });

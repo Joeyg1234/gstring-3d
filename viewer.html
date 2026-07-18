@@ -23,6 +23,10 @@
   .sw{width:26px;height:26px;border-radius:50%;border:2px solid rgba(255,255,255,.25);cursor:pointer;transition:.12s;}
   .sw:hover{transform:scale(1.18);}
   .sw.on{border-color:#39d0ff;box-shadow:0 0 8px rgba(57,208,255,.7);}
+  #chips{position:fixed;top:16px;right:20px;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;max-width:48%;}
+  .chip{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.25);color:#cfc6e2;border-radius:999px;padding:6px 14px;font-size:12px;cursor:pointer;transition:.15s;font-family:inherit;}
+  .chip:hover{border-color:#39d0ff;color:#fff;}
+  .chip.on{background:#39d0ff;border-color:#39d0ff;color:#08011a;font-weight:600;}
   /* small embed boxes (Wix product pages etc.) */
   @media (max-width:560px){
     .hint{display:none;}
@@ -31,6 +35,8 @@
     #swatches{bottom:10px;left:12px;right:12px;}
     #swatches .row{max-width:none;gap:6px;}
     .sw{width:21px;height:21px;}
+    #chips{top:10px;right:12px;gap:5px;}
+    .chip{padding:4px 10px;font-size:10.5px;}
   }
   @media (max-height:420px){ .hint{display:none;} }
 </style>
@@ -42,6 +48,7 @@
   <p>G-String Bowstrings &middot; 3D preview</p>
 </div>
 <div class="hint">drag to spin &middot; scroll / pinch to zoom &middot; double-click to reset</div>
+<div id="chips"></div>
 <div id="swatches">
   <div class="lbl">String color</div>
   <div class="row" id="swRow"></div>
@@ -103,21 +110,14 @@ const draws = [];
 let center=[0,0,0], radius=1;
 let baseM=[1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
 
-// Model source: inline JSON (baked single-file build) or ?model=name fetched from ./models/
-async function resolveModel(){
-  const raw = document.getElementById("modelData").textContent.trim();
-  if(raw.startsWith("{")) return JSON.parse(raw);
-  const q = new URLSearchParams(location.search);
-  const name = (q.get("model")||"").replace(/[^a-zA-Z0-9-_]/g,"");
-  if(!name) throw new Error("NO MODEL SPECIFIED — add ?model=name to the URL");
-  const resp = await fetch("models/"+name+".json");
-  if(!resp.ok) throw new Error("MODEL NOT FOUND: "+name);
-  return await resp.json();
-}
-
 function rotZ(t){ const c=Math.cos(t), s=Math.sin(t); return [c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1]; }
 
 function setupModel(model){
+  // reset scene state so models can be swapped at runtime
+  for(const d of draws){ gl.deleteBuffer(d.vb); gl.deleteBuffer(d.nb); gl.deleteBuffer(d.ib); }
+  draws.length = 0;
+  rotX=-0.12; rotY=0.55; zoom=1; velX=velY=0; autoSpin=true;
+  HOME.rotX=rotX; HOME.rotY=rotY; HOME.zoom=1;
   const bb = {min:[1e30,1e30,1e30], max:[-1e30,-1e30,-1e30]};
   for(const m of model.meshes){
     const pos = b64f(m.v), idx = b64u(m.i);
@@ -336,16 +336,101 @@ function initPicker(){
 // debug/test hook
 window.__spin = (dy, dx) => { rotY += dy||0; rotX += dx||0; render(); return [rotX, rotY]; };
 
-resolveModel()
-  .then(m => {
-    setupModel(m);
-    document.getElementById("loading").style.display = "none";
-    tick();
-  })
-  .catch(e => {
-    console.error(e);
-    document.getElementById("loading").textContent = e.message || "FAILED TO LOAD MODEL";
+/* ---------------- color sync (Wix Velo -> postMessage) ---------------- */
+function cssToHex(name){
+  const el = document.createElement("i");
+  el.style.color = name;
+  if(!el.style.color) return null;
+  document.body.appendChild(el);
+  const m = getComputedStyle(el).color.match(/\d+/g);
+  document.body.removeChild(el);
+  return m ? "#"+m.slice(0,3).map(x=>(+x).toString(16).padStart(2,"0")).join("") : null;
+}
+function applyColorByName(name, finish){
+  const box = document.getElementById("swatches");
+  const want = String(name).trim().toLowerCase();
+  const rows = [...box.querySelectorAll(".row")];
+  const lbls = [...box.querySelectorAll(".lbl")].map(l=>l.textContent.toLowerCase());
+  // try the requested finish's row first, then anodize, then the rest
+  const order = rows.map((r,i)=>({r, pri:
+    (finish && (lbls[i]||"").includes(String(finish).toLowerCase())) ? 0 :
+    (lbls[i]||"").includes("anodize") ? 1 : 2 })).sort((a,b)=>a.pri-b.pri);
+  for(const {r} of order)
+    for(const sw of r.children){
+      const t = (sw.title||"").toLowerCase();
+      if(t===want || t.includes(want) || want.includes(t)){ sw.click(); return true; }
+    }
+  const hex = cssToHex(want);           // fallback: any CSS color name
+  if(!hex) return false;
+  const strings = draws.filter(d=>(d.name||"").toLowerCase().includes("string"));
+  const targets = strings.length ? strings : draws;
+  targets.forEach(d=>{ d.color = hex2lin(hex); d.metal = strings.length?0:1; });
+  box.querySelectorAll(".sw").forEach(x=>x.classList.remove("on"));
+  render();
+  return true;
+}
+window.addEventListener("message", e=>{
+  const d = e.data || {};
+  if(d.type==="setColor" && d.name) applyColorByName(d.name, d.finish);
+  else if(d.type==="setModel" && d.model) loadByName(String(d.model).replace(/[^a-zA-Z0-9-_]/g,""));
+});
+
+/* ---------------- multi-model loading + chips ---------------- */
+let MODEL_LIST = [];   // [{model, title}]
+async function loadByName(name){
+  const L = document.getElementById("loading");
+  L.style.display = "flex"; L.textContent = "LOADING MODEL…";
+  try{
+    const resp = await fetch("models/"+name+".json");
+    if(!resp.ok) throw new Error("MODEL NOT FOUND: "+name);
+    setupModel(await resp.json());
+    L.style.display = "none";
+    document.querySelectorAll("#chips .chip").forEach(c=>c.classList.toggle("on", c.dataset.m===name));
+    render();
+  }catch(err){ console.error(err); L.textContent = err.message || "FAILED TO LOAD MODEL"; }
+}
+function buildChips(){
+  const el = document.getElementById("chips");
+  el.innerHTML = "";
+  if(MODEL_LIST.length < 2) return;
+  MODEL_LIST.forEach(m=>{
+    const b = document.createElement("button");
+    b.className = "chip"; b.dataset.m = m.model;
+    b.textContent = m.title || m.model;
+    b.onclick = ()=>loadByName(m.model);
+    el.appendChild(b);
   });
+}
+(async function boot(){
+  const L = document.getElementById("loading");
+  try{
+    const raw = document.getElementById("modelData").textContent.trim();
+    if(raw.startsWith("{")){                       // baked single-file build
+      setupModel(JSON.parse(raw));
+      L.style.display = "none";
+      tick();
+      return;
+    }
+    const clean = s => s.replace(/[^a-zA-Z0-9-_]/g,"");
+    const pretty = s => s.replace(/-/g," ").replace(/\b\w/g,c=>c.toUpperCase());
+    const q = new URLSearchParams(location.search);
+    if(q.get("models")){                           // explicit list
+      MODEL_LIST = q.get("models").split(",").map(clean).filter(Boolean).map(m=>({model:m, title:pretty(m)}));
+    }else if(q.get("tag")){                        // tag lookup in models/index.json
+      const idx = await (await fetch("models/index.json")).json();
+      const tag = q.get("tag").toLowerCase();
+      MODEL_LIST = idx.filter(m => tag==="all" || (m.tags||[]).map(t=>t.toLowerCase()).includes(tag));
+      if(!MODEL_LIST.length) throw new Error("NO MODELS TAGGED: "+q.get("tag"));
+    }else if(q.get("model")){                      // single model
+      MODEL_LIST = [{model: clean(q.get("model"))}];
+    }else{
+      throw new Error("NO MODEL SPECIFIED — add ?model=, ?models= or ?tag= to the URL");
+    }
+    buildChips();
+    tick();
+    await loadByName(MODEL_LIST[0].model);
+  }catch(err){ console.error(err); L.textContent = err.message || "FAILED TO LOAD"; }
+})();
 </script>
 </body>
 </html>

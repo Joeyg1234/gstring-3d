@@ -1,0 +1,5 @@
+[
+  {"model": "osprey-shelf-rest", "title": "Osprey Shelf Rest", "tags": ["osprey", "oneida"]},
+  {"model": "pro2g-shelf-rest",  "title": "Pro2G Shelf Rest",  "tags": ["pro2g"]},
+  {"model": "grex-gen2",         "title": "G-Rex Gen 2",       "tags": ["grex", "bow"]}
+]
