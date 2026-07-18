@@ -180,6 +180,7 @@ function computeNormals(pos, idx){
 
 let rotX=-0.12, rotY=0.55, zoom=1, autoSpin=true;
 let velX=0, velY=0;
+let BG=null;   // [r,g,b,a] override for the canvas clear color (used by video recording)
 const HOME={rotX,rotY,zoom:1};
 
 function matMul(a,b){ const o=new Float32Array(16);
@@ -191,7 +192,7 @@ function render(){
   const w=canvas.clientWidth*dpr, h=canvas.clientHeight*dpr;
   if(canvas.width!==w||canvas.height!==h){ canvas.width=w; canvas.height=h; }
   gl.viewport(0,0,w,h);
-  gl.clearColor(0,0,0,0);
+  if(BG) gl.clearColor(BG[0],BG[1],BG[2],BG[3]); else gl.clearColor(0,0,0,0);
   gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
   gl.useProgram(prog);
 
@@ -331,6 +332,8 @@ function initPicker(){
     mkRow("Powder coat color · matte", POWDER_COLORS, draws, 0.12);
   }
   window.__setString = i => { box.querySelectorAll(".sw")[i]?.click(); };
+  // ?picker=off hides the swatch UI (color still controllable via postMessage — e.g. Wix's own option)
+  if(new URLSearchParams(location.search).get("picker") === "off") box.style.display = "none";
 }
 
 // debug/test hook

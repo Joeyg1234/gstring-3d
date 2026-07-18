@@ -35,7 +35,9 @@ $w.onReady(async function () {
         const product = await $w('#productPage1').getProduct();
         const model = MODELS[product.slug];
         if (model) {
-            $w(HTML_ID).src = `${VIEWER_BASE}/viewer.html?model=${model}`;
+            // picker=off hides the viewer's own swatches — the product's Color option drives the 3D.
+            // Remove "&picker=off" if you ever want the swatches back.
+            $w(HTML_ID).src = `${VIEWER_BASE}/viewer.html?model=${model}&picker=off`;
             $w(HTML_ID).expand();
         } else {
             $w(HTML_ID).collapse();
