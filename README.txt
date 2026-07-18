@@ -9,7 +9,7 @@ model from the web address, like:
 
 STEP 1 — HOST IT (one time, ~10 minutes, free)
   Easiest: Netlify Drop
-    1. Go to  https://app.netlify.com/drop
+    1. Go to  (already done — hosted on GitHub Pages)
     2. Create the free account it asks for
     3. Drag this WHOLE gstring-3d-site folder onto the page
     4. It gives you a link like  https://something-1234.netlify.app

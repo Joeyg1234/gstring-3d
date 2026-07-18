@@ -21,7 +21,7 @@
 // whole store from day one.
 // ============================================================
 
-const VIEWER_BASE = "https://YOUR-SITE-NAME.netlify.app"; // <-- change me
+const VIEWER_BASE = "https://joeyg1234.github.io/gstring-3d"; // your GitHub Pages site
 const HTML_ID = "#html1";                                  // <-- your embed element's ID
 
 const MODELS = {
