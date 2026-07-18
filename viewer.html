@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G-String 3D Viewer</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#08010f;}
+  body{background:radial-gradient(120% 90% at 50% 20%, #2a0a4a 0%, #14032b 45%, #060010 100%);
+       font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  #c{width:100%;height:100%;display:block;cursor:grab;touch-action:none;}
+  #c.grabbing{cursor:grabbing;}
+  .brand{position:fixed;top:18px;left:22px;color:#fff;pointer-events:none;user-select:none;}
+  .brand h1{margin:0;font-size:17px;letter-spacing:3px;font-weight:800;}
+  .brand h1 span{background:linear-gradient(90deg,#39d0ff,#7be59a);-webkit-background-clip:text;background-clip:text;color:transparent;}
+  .brand p{margin:3px 0 0;font-size:11px;letter-spacing:1.5px;color:#9f8fc0;text-transform:uppercase;}
+  .hint{position:fixed;bottom:16px;right:20px;color:#9f8fc0;font-size:11.5px;letter-spacing:.5px;pointer-events:none;user-select:none;}
+  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#9f8fc0;font-size:13px;letter-spacing:2px;}
+  #swatches{position:fixed;bottom:14px;left:20px;user-select:none;}
+  #swatches .lbl{color:#9f8fc0;font-size:10.5px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;}
+  #swatches .lbl + .row + .lbl, #swatches .row + .lbl{margin-top:9px;}
+  #swatches .row{display:flex;gap:8px;flex-wrap:wrap;max-width:340px;}
+  .sw{width:26px;height:26px;border-radius:50%;border:2px solid rgba(255,255,255,.25);cursor:pointer;transition:.12s;}
+  .sw:hover{transform:scale(1.18);}
+  .sw.on{border-color:#39d0ff;box-shadow:0 0 8px rgba(57,208,255,.7);}
+  /* small embed boxes (Wix product pages etc.) */
+  @media (max-width:560px){
+    .hint{display:none;}
+    .brand h1{font-size:13.5px;letter-spacing:2px;}
+    .brand p{font-size:9.5px;}
+    #swatches{bottom:10px;left:12px;right:12px;}
+    #swatches .row{max-width:none;gap:6px;}
+    .sw{width:21px;height:21px;}
+  }
+  @media (max-height:420px){ .hint{display:none;} }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="brand">
+  <h1><span>G-STRING</span> 3D</h1>
+  <p>G-String Bowstrings &middot; 3D preview</p>
+</div>
+<div class="hint">drag to spin &middot; scroll / pinch to zoom &middot; double-click to reset</div>
+<div id="swatches">
+  <div class="lbl">String color</div>
+  <div class="row" id="swRow"></div>
+</div>
+<div id="loading">LOADING MODEL&hellip;</div>
+<script id="modelData" type="application/json">__MODEL_JSON__</script>
+<script>
+"use strict";
+const canvas = document.getElementById("c");
+const gl = canvas.getContext("webgl2", {antialias:true, alpha:true});
+
+const VS = `#version 300 es
+in vec3 p; in vec3 n;
+uniform mat4 mvp; uniform mat3 nm;
+out vec3 vN; out vec3 vP;
+void main(){ gl_Position = mvp*vec4(p,1.0); vN = nm*n; vP = p; }`;
+
+const FS = `#version 300 es
+precision mediump float;
+in vec3 vN; out vec4 outCol;
+uniform vec3 uColor;
+uniform float uMetal;   // 0 = matte powder coat, 1 = anodized metal
+void main(){
+  vec3 N = normalize(vN);
+  vec3 V = vec3(0.0,0.0,1.0);
+  vec3 L1 = normalize(vec3(0.45,0.75,0.55));   // key
+  vec3 L2 = normalize(vec3(-0.6,-0.15,0.45));  // fill
+  vec3 L3 = normalize(vec3(0.1,0.35,-1.0));    // rim
+  float d1 = max(dot(N,L1),0.0), d2 = max(dot(N,L2),0.0);
+  float diff = 0.28 + 0.62*d1 + 0.22*d2;
+  vec3 H1 = normalize(L1+V);
+  vec3 H2 = normalize(L2+V);
+  // metals: dimmer diffuse, bright color-tinted highlights; powder: soft white highlight
+  float kd = mix(1.0, 0.36, uMetal);
+  vec3 specCol = mix(vec3(1.0), clamp(uColor*1.8+0.22, 0.0, 1.0), uMetal);
+  float s1 = pow(max(dot(N,H1),0.0), mix(48.0, 90.0, uMetal));
+  float s2 = pow(max(dot(N,H2),0.0), mix(48.0, 32.0, uMetal));
+  float ks1 = mix(0.45, 1.7, uMetal);
+  float ks2 = mix(0.10, 0.6, uMetal);
+  // fake vertical environment sheen so metal reads as metal even face-on
+  float env = mix(0.0, 0.38, uMetal) * (0.42 + 0.58*N.y);
+  float rim = 0.35*pow(max(dot(N,L3),0.0), 3.0);
+  vec3 c = uColor*diff*kd + specCol*(s1*ks1 + s2*ks2) + specCol*env + vec3(0.55,0.85,1.0)*rim*0.35;
+  outCol = vec4(pow(c, vec3(1.0/2.2)), 1.0);
+}`;
+
+function shader(t,src){ const s=gl.createShader(t); gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER,VS));
+gl.attachShader(prog, shader(gl.FRAGMENT_SHADER,FS));
+gl.linkProgram(prog);
+gl.enable(gl.DEPTH_TEST);
+
+const b64f = s => new Float32Array(Uint8Array.from(atob(s), c=>c.charCodeAt(0)).buffer);
+const b64u = s => new Uint32Array(Uint8Array.from(atob(s), c=>c.charCodeAt(0)).buffer);
+
+const draws = [];
+let center=[0,0,0], radius=1;
+let baseM=[1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
+
+// Model source: inline JSON (baked single-file build) or ?model=name fetched from ./models/
+async function resolveModel(){
+  const raw = document.getElementById("modelData").textContent.trim();
+  if(raw.startsWith("{")) return JSON.parse(raw);
+  const q = new URLSearchParams(location.search);
+  const name = (q.get("model")||"").replace(/[^a-zA-Z0-9-_]/g,"");
+  if(!name) throw new Error("NO MODEL SPECIFIED — add ?model=name to the URL");
+  const resp = await fetch("models/"+name+".json");
+  if(!resp.ok) throw new Error("MODEL NOT FOUND: "+name);
+  return await resp.json();
+}
+
+function rotZ(t){ const c=Math.cos(t), s=Math.sin(t); return [c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1]; }
+
+function setupModel(model){
+  const bb = {min:[1e30,1e30,1e30], max:[-1e30,-1e30,-1e30]};
+  for(const m of model.meshes){
+    const pos = b64f(m.v), idx = b64u(m.i);
+    const nor = m.n ? b64f(m.n) : computeNormals(pos, idx);
+    for(let i=0;i<pos.length;i+=3)
+      for(let k=0;k<3;k++){ const c=pos[i+k]; if(c<bb.min[k])bb.min[k]=c; if(c>bb.max[k])bb.max[k]=c; }
+    const vb=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vb); gl.bufferData(gl.ARRAY_BUFFER,pos,gl.STATIC_DRAW);
+    const nb=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,nb); gl.bufferData(gl.ARRAY_BUFFER,nor,gl.STATIC_DRAW);
+    const ib=gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,idx,gl.STATIC_DRAW);
+    const isString = (m.name||"").toLowerCase().includes("string");
+    draws.push({vb,nb,ib,count:idx.length,color:m.color||[0.55,0.57,0.60],name:m.name,
+                metal:isString?0.0:0.85});   // bare parts read as machined metal by default
+  }
+
+function computeNormals(pos, idx){
+  const nor = new Float32Array(pos.length);
+  for(let i=0;i<idx.length;i+=3){
+    const a=idx[i]*3,b=idx[i+1]*3,c=idx[i+2]*3;
+    const ux=pos[b]-pos[a],uy=pos[b+1]-pos[a+1],uz=pos[b+2]-pos[a+2];
+    const vx=pos[c]-pos[a],vy=pos[c+1]-pos[a+1],vz=pos[c+2]-pos[a+2];
+    const nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx;
+    for(const j of [a,b,c]){ nor[j]+=nx; nor[j+1]+=ny; nor[j+2]+=nz; }
+  }
+  return nor;
+}
+
+  center=[(bb.min[0]+bb.max[0])/2,(bb.min[1]+bb.max[1])/2,(bb.min[2]+bb.max[2])/2];
+  radius=Math.hypot(bb.max[0]-bb.min[0],bb.max[1]-bb.min[1],bb.max[2]-bb.min[2])/2;
+
+  // stand the model up: rotate its longest bbox axis onto screen-vertical (Y)
+  const dims=[bb.max[0]-bb.min[0], bb.max[1]-bb.min[1], bb.max[2]-bb.min[2]];
+  const longest=dims.indexOf(Math.max(...dims));
+  baseM=[1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];                   // Y already vertical
+  if(longest===0) baseM=[0,1,0,0, -1,0,0,0, 0,0,1,0, 0,0,0,1];  // Rz(90): X -> Y
+  if(longest===2) baseM=[1,0,0,0, 0,0,-1,0, 0,1,0,0, 0,0,0,1];  // Rx(-90): Z -> Y
+
+  // per-model display rotation (degrees, screen plane): "rot" in the model JSON, or ?rot= in the URL
+  const q = new URLSearchParams(location.search);
+  const rotDeg = q.has("rot") ? parseFloat(q.get("rot")) : (model.rot || 0);
+  if(rotDeg) baseM = matMul(rotZ(rotDeg*Math.PI/180), baseM);
+
+  // dynamic title (URL-mode): ?title=... or "title" in the model JSON
+  const t = q.get("title") || model.title;
+  if(t){
+    const h = document.querySelector(".brand h1");
+    h.textContent = "";
+    const parts = t.trim().split(/\s+/);
+    const sp = document.createElement("span"); sp.textContent = parts[0];
+    h.appendChild(sp);
+    if(parts.length > 1) h.appendChild(document.createTextNode(" " + parts.slice(1).join(" ")));
+    document.title = t + " — 3D Viewer";
+  }
+
+  initPicker();
+}
+
+let rotX=-0.12, rotY=0.55, zoom=1, autoSpin=true;
+let velX=0, velY=0;
+const HOME={rotX,rotY,zoom:1};
+
+function matMul(a,b){ const o=new Float32Array(16);
+  for(let c=0;c<4;c++)for(let r=0;r<4;r++){ let s=0; for(let k=0;k<4;k++)s+=a[k*4+r]*b[c*4+k]; o[c*4+r]=s; }
+  return o; }
+
+function render(){
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  const w=canvas.clientWidth*dpr, h=canvas.clientHeight*dpr;
+  if(canvas.width!==w||canvas.height!==h){ canvas.width=w; canvas.height=h; }
+  gl.viewport(0,0,w,h);
+  gl.clearColor(0,0,0,0);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  gl.useProgram(prog);
+
+  const cx=Math.cos(rotX),sx=Math.sin(rotX),cy=Math.cos(rotY),sy=Math.sin(rotY);
+  const rx=[1,0,0,0, 0,cx,sx,0, 0,-sx,cx,0, 0,0,0,1];
+  const ry=[cy,0,-sy,0, 0,1,0,0, sy,0,cy,0, 0,0,0,1];
+  const t=[1,0,0,0, 0,1,0,0, 0,0,1,0, -center[0],-center[1],-center[2],1];
+  const modelM = matMul(matMul(rx,ry), matMul(baseM,t));
+  const dist = radius*3.3/zoom;
+  const view=[1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-dist,1];
+  const near=Math.max(dist-radius*2.5, radius*0.01), far=dist+radius*2.5;
+  const fv=1/Math.tan(38*Math.PI/360), aspect=w/h;
+  const proj=[fv/aspect,0,0,0, 0,fv,0,0, 0,0,(far+near)/(near-far),-1, 0,0,2*far*near/(near-far),0];
+  const mvp=matMul(proj, matMul(view, modelM));
+  gl.uniformMatrix4fv(gl.getUniformLocation(prog,"mvp"),false,mvp);
+  const nm=[modelM[0],modelM[1],modelM[2], modelM[4],modelM[5],modelM[6], modelM[8],modelM[9],modelM[10]];
+  gl.uniformMatrix3fv(gl.getUniformLocation(prog,"nm"),false,nm);
+
+  const pl=gl.getAttribLocation(prog,"p"), nl=gl.getAttribLocation(prog,"n");
+  const colLoc=gl.getUniformLocation(prog,"uColor");
+  const metalLoc=gl.getUniformLocation(prog,"uMetal");
+  for(const d of draws){
+    gl.uniform3fv(colLoc, d.color);
+    gl.uniform1f(metalLoc, d.metal);
+    gl.bindBuffer(gl.ARRAY_BUFFER,d.vb); gl.enableVertexAttribArray(pl); gl.vertexAttribPointer(pl,3,gl.FLOAT,false,0,0);
+    gl.bindBuffer(gl.ARRAY_BUFFER,d.nb); gl.enableVertexAttribArray(nl); gl.vertexAttribPointer(nl,3,gl.FLOAT,false,0,0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,d.ib);
+    gl.drawElements(gl.TRIANGLES,d.count,gl.UNSIGNED_INT,0);
+  }
+}
+
+function tick(){
+  if(autoSpin) rotY += 0.004;
+  else{
+    rotY += velY; rotX += velX;
+    velY *= 0.93; velX *= 0.93;
+    rotX = Math.max(-1.55, Math.min(1.55, rotX));
+  }
+  render();
+  requestAnimationFrame(tick);
+}
+
+let dragging=false, lx=0, ly=0;
+const pts = new Map();
+let pinchDist=0;
+
+canvas.addEventListener("pointerdown",e=>{
+  pts.set(e.pointerId,[e.clientX,e.clientY]);
+  if(pts.size===1){ dragging=true; autoSpin=false; velX=velY=0; lx=e.clientX; ly=e.clientY; canvas.classList.add("grabbing"); }
+  if(pts.size===2){ const a=[...pts.values()]; pinchDist=Math.hypot(a[0][0]-a[1][0],a[0][1]-a[1][1]); }
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener("pointermove",e=>{
+  if(!pts.has(e.pointerId)) return;
+  pts.set(e.pointerId,[e.clientX,e.clientY]);
+  if(pts.size===2){
+    const a=[...pts.values()];
+    const d=Math.hypot(a[0][0]-a[1][0],a[0][1]-a[1][1]);
+    if(pinchDist>0){ zoom*=d/pinchDist; zoom=Math.max(0.3,Math.min(9,zoom)); render(); }
+    pinchDist=d;
+    return;
+  }
+  if(!dragging) return;
+  const dx=(e.clientX-lx)*0.008, dy=(e.clientY-ly)*0.008;
+  rotY+=dx; rotX+=dy;
+  rotX=Math.max(-1.55,Math.min(1.55,rotX));
+  velY=dx*0.6; velX=dy*0.6;
+  lx=e.clientX; ly=e.clientY;
+  render(); // stay responsive even if rAF is throttled (e.g. inside an iframe embed)
+});
+function endPointer(e){
+  pts.delete(e.pointerId);
+  if(pts.size<2) pinchDist=0;
+  if(pts.size===0){ dragging=false; canvas.classList.remove("grabbing"); }
+}
+canvas.addEventListener("pointerup",endPointer);
+canvas.addEventListener("pointercancel",endPointer);
+canvas.addEventListener("wheel",e=>{
+  e.preventDefault(); autoSpin=false;
+  zoom*=Math.exp(-e.deltaY*0.0012);
+  zoom=Math.max(0.3,Math.min(9,zoom));
+  render();
+},{passive:false});
+canvas.addEventListener("dblclick",()=>{ rotX=HOME.rotX; rotY=HOME.rotY; zoom=HOME.zoom; velX=velY=0; autoSpin=true; render(); });
+
+// ---- color picker ----
+// Models with "*string*" bodies get string colors (just the strings).
+// Machined parts get TWO rows: Anodize (metallic finish) and Powder coat (matte finish).
+const STRING_COLORS = [
+  ["Black","#141414"], ["White","#f2f2f2"], ["Red","#d81f2a"], ["Flo Green","#4cdb30"],
+  ["Flo Orange","#ff6a13"], ["Flo Yellow","#ffe81a"], ["Flo Purple","#8e2bff"],
+  ["Flo Pink","#ff3fa4"], ["Royal Blue","#1c46d6"], ["Teal","#12c7b9"],
+  ["Tan","#c9a875"], ["Silver","#b9bcc2"]
+];
+const ANODIZE_COLORS = [
+  ["Raw aluminum", null], ["Black","#232529"], ["Red","#b3122e"], ["Blue","#1747c8"],
+  ["Green","#128a43"], ["Gold","#caa64a"], ["Purple","#6d2bd8"],
+  ["Orange","#ff6a13"], ["Pink","#ff3fa4"]
+];
+const POWDER_COLORS = [
+  ["Black","#141517"], ["White","#f0f1f3"], ["Red","#d81f2a"], ["Royal Blue","#1c46d6"],
+  ["Flo Green","#4cdb30"], ["Flo Orange","#ff6a13"], ["Flo Yellow","#ffe81a"], ["FDE Tan","#cbb385"]
+];
+const hex2lin = h => [1,3,5].map(i => Math.pow(parseInt(h.slice(i,i+2),16)/255, 2.2));
+
+function initPicker(){
+  const box = document.getElementById("swatches");
+  box.innerHTML = "";
+  draws.forEach(d => { d.color0 = d.color.slice(); d.metal0 = d.metal; });
+  const stringDraws = draws.filter(d => (d.name||"").toLowerCase().includes("string"));
+
+  const mkRow = (label, colors, targets, metal) => {
+    const l = document.createElement("div"); l.className = "lbl"; l.textContent = label; box.appendChild(l);
+    const row = document.createElement("div"); row.className = "row"; box.appendChild(row);
+    colors.forEach(([name,hex])=>{
+      const b = document.createElement("div");
+      b.className = "sw";
+      b.style.background = hex || "linear-gradient(135deg,#c7ccd4 50%,#8f959e 50%)";
+      b.title = name;
+      b.onclick = ()=>{
+        targets.forEach(d => {
+          if(hex){ d.color = hex2lin(hex); d.metal = metal; }
+          else   { d.color = d.color0.slice(); d.metal = d.metal0; }
+        });
+        box.querySelectorAll(".sw").forEach(x=>x.classList.remove("on"));
+        b.classList.add("on");
+        render();
+      };
+      row.appendChild(b);
+    });
+  };
+
+  if(stringDraws.length){
+    mkRow("String color", STRING_COLORS, stringDraws, 0.0);
+  }else{
+    mkRow("Anodize color · metallic", ANODIZE_COLORS, draws, 1.0);
+    mkRow("Powder coat color · matte", POWDER_COLORS, draws, 0.12);
+  }
+  window.__setString = i => { box.querySelectorAll(".sw")[i]?.click(); };
+}
+
+// debug/test hook
+window.__spin = (dy, dx) => { rotY += dy||0; rotX += dx||0; render(); return [rotX, rotY]; };
+
+resolveModel()
+  .then(m => {
+    setupModel(m);
+    document.getElementById("loading").style.display = "none";
+    tick();
+  })
+  .catch(e => {
+    console.error(e);
+    document.getElementById("loading").textContent = e.message || "FAILED TO LOAD MODEL";
+  });
+</script>
+</body>
+</html>
